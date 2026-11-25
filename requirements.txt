@@ -1,6 +1,7 @@
 streamlit
 plotly
-numpy
 pandas
+numpy
 requests
 matplotlib
+scikit-learn==1.7.2

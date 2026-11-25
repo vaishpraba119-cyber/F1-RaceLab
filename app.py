@@ -34,7 +34,7 @@ st.set_page_config(
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 2rem;
+    padding-top: 4rem;
     max-width: 1500px;
 }
 [data-testid="stMetric"] {
@@ -223,7 +223,7 @@ st.markdown(
 )
 
 st.caption(
-    "Motorsport telemetry & performance analytics · v2.2"
+    "Motorsport telemetry & performance analytics · v3.0"
 )
 
 
@@ -237,6 +237,10 @@ pages = [
     "Circuit Maps",
     "Gear Analysis",
     "Tyres & Weather",
+    "Tyre Degradation",
+    "ML Lap Predictor",
+    "Undercut & Overcut",
+    "Strategy Optimiser",
     "Engineering Insights",
     "Data Export",
     "Methodology",
@@ -247,6 +251,160 @@ page = st.sidebar.radio(
     "Dashboard navigation",
     pages
 )
+
+# Independent v3.0 modelling pages
+if page in ['Tyre Degradation', 'ML Lap Predictor', 'Undercut & Overcut', 'Strategy Optimiser']:
+    try:
+        if page in ['Tyre Degradation', 'ML Lap Predictor']:
+            st.sidebar.header('Historical race selection')
+            y = st.sidebar.selectbox('Season', get_years(), index=get_years().index(2025) if 2025 in get_years() else 0, key='model_year')
+            meetings = get_meetings(y)
+            meetings = meetings[meetings.meeting_name.str.contains('Grand Prix', case=False, na=False)]
+            if meetings.empty:
+                st.info('No races available.'); st.stop()
+            names = dict(zip(meetings.meeting_key.astype(int), meetings.meeting_name))
+            mk3 = st.sidebar.selectbox('Grand Prix', list(names), format_func=names.get, key=f'model_gp{y}')
+            sessions3 = get_sessions(mk3)
+            races = sessions3[sessions3.session_name == 'Race']
+            if races.empty:
+                st.info('No completed race available.'); st.stop()
+            sk3 = int(races.iloc[0].session_key)
+            drivers3 = get_drivers(sk3)
+            labels = dict(zip(drivers3.driver_number.astype(int), drivers3.full_name))
+            if not labels:
+                st.info('No drivers available.'); st.stop()
+            st.header(f'{y} {names[mk3]} — {page}')
+            if page == 'Tyre Degradation':
+                from tyre_model import analyse_tyre_stints, plot_tyre_degradation, plot_tyre_prediction, generate_tyre_insights
+                n = st.selectbox('Driver', list(labels), format_func=labels.get)
+                degree = st.radio('Regression', [1, 2], format_func=lambda x: 'Linear' if x == 1 else 'Quadratic', horizontal=True)
+                cfg = (sk3, n, degree)
+                if st.button('Fit tyre models', type='primary'):
+                    st.session_state.pop('tyre3', None)
+                    with st.spinner('Retrieving race laps and fitting stints...'):
+                        st.session_state.tyre3 = (cfg, analyse_tyre_stints(sk3, n, degree))
+                saved = st.session_state.get('tyre3')
+                if saved and saved[0] == cfg:
+                    result = saved[1]
+                    table(result['summary'])
+                    if not result['summary'].empty:
+                        chart(plot_tyre_degradation(result), 'tyre3chart')
+                        eligible = [k for k,v in result['models'].items() if v['mae'] < v['baseline_mae']]
+                        if eligible:
+                            stint = st.selectbox('Stint passing baseline comparison', eligible)
+                            horizon = st.slider('Extrapolation laps', 1, 10, 5)
+                            chart(plot_tyre_prediction(result['models'][stint], future_laps=horizon), 'tyre3prediction')
+                        else:
+                            st.info('No fitted stint beat its baseline; extrapolation disabled.')
+                    for item in generate_tyre_insights(result):
+                        st.write('• ' + item)
+                    for key in ['summary', 'clean_data', 'raw_data']:
+                        st.download_button('Download '+key, result[key].to_csv(index=False), key+'.csv', 'text/csv', key='tyre3'+key)
+                st.caption('Observed pace trends combine tyre wear, fuel, traffic and track evolution. Baseline success does not guarantee future accuracy.')
+            else:
+                from lap_predictor import (FEATURES, build_race_dataset, train_lap_predictor, predict_single_lap, plot_model_comparison, plot_prediction_accuracy, plot_prediction_errors, plot_driver_predictions, generate_prediction_insights)
+                selected = st.multiselect('Training drivers', list(labels), default=list(labels)[:4], format_func=labels.get)
+                cfg = (sk3, tuple(selected))
+                if st.button('Train and evaluate models', type='primary', disabled=not selected):
+                    st.session_state.pop('ml3', None)
+                    with st.spinner('Building dataset and training models...'):
+                        data, skipped = build_race_dataset(sk3, selected)
+                        st.session_state.ml3 = (cfg, train_lap_predictor(data), skipped)
+                saved = st.session_state.get('ml3')
+                if saved and saved[0] == cfg:
+                    result, skipped = saved[1:]
+                    st.subheader(result['best_model_name'])
+                    cols = st.columns(3)
+                    for col, key in zip(cols, ['training_samples','validation_samples','testing_samples']):
+                        col.metric(key.replace('_',' ').title(), result[key])
+                    if not skipped.empty:
+                        st.warning('Some drivers were skipped.'); table(skipped)
+                    table(result['validation_leaderboard']); table(result['test_summary'])
+                    chart(plot_model_comparison(result), 'ml3leader')
+                    chart(plot_prediction_accuracy(result), 'ml3accuracy')
+                    chart(plot_prediction_errors(result), 'ml3errors')
+                    nums = result['test_predictions']['Driver Number'].unique().tolist()
+                    n = st.selectbox('Test driver', nums, format_func=lambda x: labels.get(int(x), str(x)))
+                    chart(plot_driver_predictions(result, n), 'ml3driver')
+                    st.subheader('Single-lap what-if prediction')
+                    sample = result['testing_data'].iloc[0]
+                    with st.form('ml3form'):
+                        values = {}
+                        for feature in FEATURES:
+                            if feature == 'Driver Number':
+                                values[feature] = st.selectbox(feature, [str(x) for x in selected])
+                            elif feature == 'Compound':
+                                values[feature] = st.selectbox(feature, sorted(result['training_data'][feature].unique()))
+                            else:
+                                values[feature] = st.number_input(feature, value=float(sample[feature]) if pd.notna(sample[feature]) else 0.0)
+                        submitted = st.form_submit_button('Predict lap time')
+                    if submitted:
+                        st.metric('Estimated lap time', f'{predict_single_lap(result, values):.3f} s')
+                    for item in generate_prediction_insights(result): st.write('• '+item)
+                    for key in ['validation_leaderboard','test_summary','test_predictions']:
+                        st.download_button('Download '+key, result[key].to_csv(index=False), key+'.csv','text/csv',key='ml3'+key)
+                st.caption('Within-race chronological evaluation only. Lap-start splits may allow boundary overlap; unseen-race accuracy is not established.')
+        else:
+            from strategy import (DEFAULT_TYRES, simulate_strategy, optimise_strategy, simulate_undercut_overcut, compare_strategies, format_race_time, plot_strategy_lap_times, plot_strategy_timeline, plot_strategy_leaderboard, plot_undercut_overcut, plot_strategy_comparison, generate_strategy_insights)
+            st.header(page)
+            st.caption('Illustrative dry-race simulation, not calibrated to a specific circuit.')
+            laps = st.sidebar.slider('Race laps', 20, 80, 57)
+            loss = st.sidebar.number_input('Pit loss (s)', 0.0, 60.0, 22.0)
+            fuel = st.sidebar.number_input('Fuel effect (s/lap)', 0.0, 0.2, 0.03, step=0.01)
+            warm = st.sidebar.number_input('Warm-up penalty (s)', 0.0, 10.0, 0.8)
+            minimum = st.sidebar.slider('Minimum stint length', 1, 10, 5)
+            params = {}
+            with st.expander('Tyre model parameters', expanded=True):
+                for compound, defaults in DEFAULT_TYRES.items():
+                    st.markdown('**'+compound+'**')
+                    c = st.columns(4)
+                    params[compound] = dict(base_time=c[0].number_input('Base time (s)', 30.0, 300.0, float(defaults['base_time']), key=compound+'base'), degradation=c[1].number_input('Trend (s/lap)', 0.0, 2.0, float(defaults['degradation']), step=0.005, format='%.3f', key=compound+'deg'), quadratic=c[2].number_input('Quadratic term', 0.0, 0.1, 0.0, step=0.001, format='%.3f', key=compound+'quad'), max_age=c[3].number_input('Maximum stint laps', 1, 100, int(defaults['max_age']), key=compound+'age'))
+            if page == 'Undercut & Overcut':
+                original = st.selectbox('Starting compound', list(params))
+                new = st.selectbox('New compound', [x for x in params if x != original])
+                lo = max(minimum, laps-params[new]['max_age'])
+                hi = min(laps-minimum, params[original]['max_age'])
+                if lo > hi:
+                    st.warning('No feasible reference pit lap for these settings.'); st.stop()
+                pit = st.number_input('Reference pit lap', lo, hi, min(max(20,lo),hi))
+                window = st.slider('Pit window', 1, 15, 5)
+                result = simulate_undercut_overcut(laps, original, new, pit, params, loss, fuel, warm, window, minimum)
+                chart(plot_undercut_overcut(result), 'under3')
+                table(result)
+                st.download_button('Download pit timing results', result.to_csv(index=False), 'undercut_overcut.csv','text/csv')
+                st.caption('Positive advantage means earlier elapsed time than the reference. Both strategies represent the same hypothetical car.')
+            else:
+                stops = st.radio('Maximum stops', [1,2], index=1, horizontal=True)
+                cfg = (laps,loss,fuel,warm,minimum,stops,repr(params))
+                if st.button('Optimise race strategy', type='primary'):
+                    st.session_state.pop('strategy3', None)
+                    with st.spinner('Searching feasible strategies...'):
+                        st.session_state.strategy3 = (cfg, optimise_strategy(laps, params, loss, fuel, warm, minimum, stops))
+                saved = st.session_state.get('strategy3')
+                if saved and saved[0] == cfg:
+                    result = saved[1]; best = result['best_strategy']; sim = result['best_simulation']
+                    st.subheader(best['Strategy'])
+                    c = st.columns(3)
+                    c[0].metric('Race time', format_race_time(best['Race Time (s)']))
+                    c[1].metric('Pit laps', best['Pit Laps'])
+                    c[2].metric('Feasible strategies', result['feasible_strategies'])
+                    chart(plot_strategy_timeline(sim), 'str3timeline')
+                    chart(plot_strategy_lap_times(sim), 'str3laps')
+                    chart(plot_strategy_leaderboard(result), 'str3rank')
+                    table(result['leaderboard'].drop(columns=['Compounds','Pit Lap Values']))
+                    candidates = result['leaderboard']
+                    rank = st.selectbox('Compare against ranked strategy', candidates['Rank'].tolist(), index=min(1,len(candidates)-1))
+                    other = candidates[candidates['Rank']==rank].iloc[0]
+                    reference = simulate_strategy(laps, other['Compounds'], other['Pit Lap Values'], params, loss, fuel, warm, minimum)
+                    chart(plot_strategy_comparison(compare_strategies(sim, reference, 'Optimal', 'Alternative'), 'Optimal', 'Alternative'), 'str3compare')
+                    for item in generate_strategy_insights(result): st.write('• '+item)
+                    st.download_button('Download strategies', result['all_strategies'].to_csv(index=False), 'strategies.csv','text/csv')
+                    st.download_button('Download optimal lap times', sim.to_csv(index=False), 'optimal_laps.csv','text/csv')
+            st.warning('Simplified dry-compound rule; traffic, safety cars, weather changes and tyre availability are not modelled.')
+    except Exception as e:
+        st.error(f'Modelling unavailable: {e}')
+    st.caption('F1 RaceLab v3.0 · Independent educational project')
+    st.stop()
 
 st.sidebar.divider()
 st.sidebar.header("Race configuration")
@@ -271,7 +429,7 @@ try:
     )
 
     # Retrieve Grand Prix events
-    meetings = get_meings = get_meetings(year)
+    meetings = get_meetings(year)
 
     if meetings.empty:
 
@@ -1354,6 +1512,6 @@ elif page == "Data Export":
 st.divider()
 
 st.caption(
-    "F1 RaceLab v2.2 · "
+    "F1 RaceLab v3.0 · "
     "Independent educational project · OpenF1"
 )
