@@ -223,13 +223,18 @@ st.markdown(
 )
 
 st.caption(
-    "Motorsport telemetry & performance analytics · v3.0"
+    "Motorsport telemetry & performance analytics · v4.0"
 )
 
 
 # Dashboard navigation
 pages = [
     "Overview",
+    "Full-Grid Replay",
+    "Multi-Driver Replay",
+    "Advanced Lap Replay",
+    "Historical Strategy Calibration",
+    "Monte Carlo Strategy",
     "Telemetry",
     "Braking",
     "Lap Delta",
@@ -252,7 +257,185 @@ page = st.sidebar.radio(
     pages
 )
 
-# Independent v3.0 modelling pages
+# Full-grid historical replay, independent of two-driver analysis.
+if page == "Full-Grid Replay":
+    from grid_replay import prepare_grid_replay, create_grid_replay, export_grid_data
+    st.header("Full-Grid Race Replay")
+    st.caption("Historical position samples and recorded timing; missing telemetry is shown as unavailable.")
+    try:
+        years = get_years()
+        year = st.sidebar.selectbox("Season", years, index=years.index(2025) if 2025 in years else 0, key="grid_year")
+        meetings = get_meetings(year)
+        if meetings.empty:
+            st.info("No meetings available."); st.stop()
+        meetings = meetings[meetings.meeting_name.str.contains("Grand Prix", case=False, na=False)]
+        if meetings.empty:
+            st.info("No Grand Prix available."); st.stop()
+        names = dict(zip(meetings.meeting_key.astype(int), meetings.meeting_name))
+        meeting = st.sidebar.selectbox("Grand Prix", list(names), format_func=names.get)
+        sessions = get_sessions(meeting)
+        if sessions.empty:
+            st.info("No completed sessions."); st.stop()
+        races = sessions[sessions.session_name == "Race"]
+        if races.empty:
+            st.info("No completed race."); st.stop()
+        session = int(races.iloc[0].session_key)
+        drivers = get_drivers(session)
+        if drivers.empty:
+            st.info("No drivers available."); st.stop()
+        labels = dict(zip(drivers.driver_number.astype(int), drivers.full_name))
+        selected = st.multiselect("Drivers", list(labels), default=list(labels)[:22], format_func=labels.get, max_selections=22)
+        c = st.columns(3)
+        offset = c[0].number_input("Start offset (seconds)", min_value=0, value=120, step=30)
+        duration = c[1].slider("Window (seconds)", 30, 300, 120, 30)
+        interval = c[2].slider("Frame interval (seconds)", 1, 5, 2)
+        speed = st.checkbox("Include speed telemetry", value=True)
+        cfg = (session, tuple(selected), offset, duration, interval, speed)
+        if st.button("Load replay", type="primary", disabled=not selected):
+            st.session_state.pop("grid4", None)
+            with st.spinner("Loading historical grid data..."):
+                result = prepare_grid_replay(session, selected, offset, duration, interval, speed)
+                st.session_state.grid4 = (cfg, result)
+        saved = st.session_state.get("grid4")
+        if saved and saved[0] == cfg:
+            result = saved[1]
+            st.metric("Drivers loaded", len(result["drivers"]))
+            if result.get("information_errors"):
+                with st.expander("Partial telemetry warnings"):
+                    st.write(result["information_errors"])
+            chart(create_grid_replay(result), "grid4chart")
+            data = export_grid_data(result)
+            cols = st.columns(3)
+            for col, field in zip(cols, ["Lap", "Tyre Age", "Speed"]):
+                col.metric(field + " coverage", f"{data[field].notna().mean():.1%}")
+            st.download_button("Download replay CSV", data.to_csv(index=False), "grid_replay.csv", "text/csv")
+    except Exception as exc:
+        st.error(f"Replay unavailable: {exc}")
+    st.stop()
+
+# Historical replay and calibrated strategy pages.
+if page in ["Multi-Driver Replay", "Historical Strategy Calibration", "Monte Carlo Strategy"]:
+    try:
+        st.header(page)
+        if page != "Monte Carlo Strategy":
+            years = get_years()
+            y = st.sidebar.selectbox("Season", years, index=years.index(2025) if 2025 in years else 0)
+            meetings = get_meetings(y)
+            if meetings.empty:
+                st.info("No meetings available."); st.stop()
+            meetings = meetings[meetings.meeting_name.str.contains("Grand Prix", case=False, na=False)]
+            names = dict(zip(meetings.meeting_key.astype(int), meetings.meeting_name))
+            if not names:
+                st.info("No Grand Prix available."); st.stop()
+            mk = st.sidebar.selectbox("Grand Prix", list(names), format_func=names.get)
+            sessions = get_sessions(mk)
+            if sessions.empty:
+                st.info("No sessions available."); st.stop()
+            races = sessions[sessions.session_name == "Race"]
+            if races.empty:
+                st.info("No completed race available."); st.stop()
+            sk = int(races.iloc[0].session_key)
+            drivers = get_drivers(sk)
+            labels = dict(zip(drivers.driver_number.astype(int), drivers.full_name))
+            selected = st.multiselect("Drivers", list(labels), default=list(labels)[:4], format_func=labels.get)
+            st.caption(f"{y} {names[mk]}")
+        if page == "Multi-Driver Replay":
+            from full_race_replay import prepare_full_race, create_full_race_replay, calculate_full_race_summary
+            offset = st.number_input("Session start offset (s)", min_value=0, value=120)
+            duration = st.slider("Replay window (s)", 30, 300, 120, 30)
+            interval = st.slider("Frame interval (s)", 1, 5, 2)
+            playback = st.slider("Playback speed", 1.0, 10.0, 5.0)
+            cfg = (sk, tuple(selected), offset, duration, interval)
+            if st.button("Load multi-driver replay", disabled=not selected, type="primary"):
+                st.session_state.pop("multi4", None)
+                with st.spinner("Loading historical positions..."):
+                    st.session_state.multi4 = (cfg, prepare_full_race(sk, selected, offset, duration, interval))
+            saved = st.session_state.get("multi4")
+            if saved and saved[0] == cfg:
+                result = saved[1]
+                chart(create_full_race_replay(result, playback), "multi4chart")
+                table(calculate_full_race_summary(result))
+                if result.get("skipped"):
+                    st.write(result["skipped"])
+        elif page == "Historical Strategy Calibration":
+            from strategy_calibration import calibrate_strategy, run_calibrated_optimisation, plot_calibrated_degradation, plot_calibration_accuracy, plot_pit_loss, generate_calibration_insights
+            from strategy import plot_strategy_timeline, plot_strategy_lap_times
+            fuel = st.number_input("Assumed fuel effect (s/lap)", 0.0, 0.2, 0.03, step=0.01)
+            laps = st.number_input("Simulation race laps", 20, 100, 57)
+            stops = st.radio("Maximum stops", [1, 2], index=1, horizontal=True)
+            cfg = (sk, tuple(selected), fuel)
+            if st.button("Calibrate historical models", disabled=not selected, type="primary"):
+                st.session_state.pop("cal4", None)
+                st.session_state.pop("calopt4", None)
+                with st.spinner("Loading historical laps and fitting tyre models..."):
+                    st.session_state.cal4 = (cfg, calibrate_strategy(sk, selected, fuel))
+            saved = st.session_state.get("cal4")
+            if saved and saved[0] == cfg:
+                cal = saved[1]
+                table(cal["summary"])
+                if not cal["race_control_available"]:
+                    st.warning("Race control data unavailable; neutralised laps may remain.")
+                chart(plot_calibrated_degradation(cal), "cal4deg")
+                if not cal["summary"].empty:
+                    chart(plot_calibration_accuracy(cal), "cal4acc")
+                chart(plot_pit_loss(cal), "cal4pit")
+                for item in generate_calibration_insights(cal): st.write(item)
+                st.download_button("Download calibration data", cal["clean_data"].to_csv(index=False), "calibration.csv")
+                optcfg = (cfg, laps, stops)
+                if st.button("Optimise calibrated strategy"):
+                    st.session_state.pop("calopt4", None)
+                    st.session_state.calopt4 = (optcfg, run_calibrated_optimisation(cal, laps, stops))
+                opt = st.session_state.get("calopt4")
+                if opt and opt[0] == optcfg:
+                    result = opt[1]
+                    table(result["parameter_sources"])
+                    st.write("Pit loss source:", result["pit_source"])
+                    st.write("Rejected models:", result["rejected_models"])
+                    sim = result["optimisation"]
+                    chart(plot_strategy_timeline(sim["best_simulation"]), "cal4timeline")
+                    chart(plot_strategy_lap_times(sim["best_simulation"]), "cal4laps")
+                    table(sim["leaderboard"].drop(columns=["Compounds", "Pit Lap Values"], errors="ignore"))
+                    st.session_state["calibrated_mc_parameters"] = dict(tyre_parameters=result["parameters"], pit_loss=result["pit_loss"], warmup_penalty=result["warmup_penalty"], fuel_effect=fuel, source=f"{y} {names[mk]}")
+                st.caption("Historical fits are observational; rejected models use illustrative fallback parameters.")
+        else:
+            from monte_carlo import run_monte_carlo, plot_win_probability, plot_race_time_distribution, plot_strategy_regret, plot_risk_return, plot_condition_analysis, plot_scenario_frequency, generate_monte_carlo_insights
+            from race_conditions import DEFAULT_CONDITIONS
+            calibrated = st.session_state.get("calibrated_mc_parameters")
+            use_cal = st.checkbox("Use last calibrated strategy parameters", disabled=not calibrated)
+            params = dict(calibrated) if use_cal and calibrated else {}
+            source = params.pop("source", "Illustrative defaults")
+            st.caption("Parameter source: " + source)
+            laps = st.number_input("Race laps", 20, 100, 57)
+            stops = st.radio("Maximum stops", [1, 2], index=1, horizontal=True)
+            candidates = st.slider("Candidate strategies", 5, 50, 20)
+            simulations = st.slider("Simulated scenarios", 100, 5000, 2000, 100)
+            seed = st.number_input("Random seed", 0, 2147483647, 42)
+            risk = st.slider("Risk weight", 0.0, 1.0, 0.5)
+            conditions = DEFAULT_CONDITIONS.copy()
+            with st.expander("Scenario assumptions", expanded=True):
+                for key in ["safety_car_probability", "vsc_probability", "rain_probability"]:
+                    conditions[key] = st.slider(key.replace("_", " ").title(), 0.0, 1.0, float(conditions[key]), 0.05)
+            cfg = (laps, stops, candidates, simulations, seed, risk, repr(conditions), repr(params), source)
+            if st.button("Run Monte Carlo simulation", type="primary"):
+                st.session_state.pop("mc4", None)
+                with st.spinner("Simulating shared race scenarios..."):
+                    st.session_state.mc4 = (cfg, run_monte_carlo(laps, maximum_stops=stops, number_of_candidates=candidates, number_of_simulations=simulations, conditions=conditions, seed=seed, risk_weight=risk, **params))
+            saved = st.session_state.get("mc4")
+            if saved and saved[0] == cfg:
+                result = saved[1]
+                st.metric("Strategy evaluations", result["number_of_candidates"] * result["number_of_simulations"])
+                st.write("Risk-ranked best:", result["best_risk_strategy"]["Strategy"])
+                table(result["leaderboard"])
+                for i, fn in enumerate([plot_win_probability, plot_race_time_distribution, plot_strategy_regret, plot_risk_return, plot_condition_analysis, plot_scenario_frequency]):
+                    chart(fn(result), f"mc4chart{i}")
+                for item in generate_monte_carlo_insights(result): st.write(item)
+                st.download_button("Download simulation leaderboard", result["leaderboard"].to_csv(index=False), "monte_carlo.csv")
+            st.warning("Probabilities are conditional on simulated assumptions and candidate strategies, not actual race-win forecasts. Rain is a pace adjustment, not a wet-tyre strategy model.")
+    except Exception as exc:
+        st.error(f"Module unavailable: {exc}")
+    st.stop()
+
+# Independent v4.0 modelling pages
 if page in ['Tyre Degradation', 'ML Lap Predictor', 'Undercut & Overcut', 'Strategy Optimiser']:
     try:
         if page in ['Tyre Degradation', 'ML Lap Predictor']:
@@ -403,7 +586,7 @@ if page in ['Tyre Degradation', 'ML Lap Predictor', 'Undercut & Overcut', 'Strat
             st.warning('Simplified dry-compound rule; traffic, safety cars, weather changes and tyre availability are not modelled.')
     except Exception as e:
         st.error(f'Modelling unavailable: {e}')
-    st.caption('F1 RaceLab v3.0 · Independent educational project')
+    st.caption('F1 RaceLab v4.0 · Independent educational project')
     st.stop()
 
 st.sidebar.divider()
@@ -927,6 +1110,26 @@ with c1:
 with c2:
     card(driver_b, lap_b, cb)
 
+
+if page == "Advanced Lap Replay":
+    from race_replay import load_replay_data, create_race_replay, calculate_replay_summary
+    st.header("Advanced Lap Replay")
+    interval = st.slider("Frame interval (s)", 0.2, 1.0, 0.4, 0.2)
+    playback = st.slider("Playback speed", 0.5, 5.0, 1.0, 0.5)
+    replay_cfg = (sk, na, nb, int(lap_a.lap_number), int(lap_b.lap_number))
+    try:
+        if st.button("Load lap replay", type="primary"):
+            st.session_state.pop("lap4", None)
+            with st.spinner("Loading lap positions and telemetry..."):
+                st.session_state.lap4 = (replay_cfg, load_replay_data(sk, na, lap_a), load_replay_data(sk, nb, lap_b))
+        saved = st.session_state.get("lap4")
+        if saved and saved[0] == replay_cfg:
+            da, db = saved[1:]
+            chart(create_race_replay(da, db, name_a, name_b, ca, cb, interval, playback), "lap4chart")
+            table(calculate_replay_summary(da, db, name_a, name_b))
+    except Exception as exc:
+        st.error(f"Lap replay unavailable: {exc}")
+    st.stop()
 
 # Retrieve stored analysis
 stored = st.session_state.racelab_v22
@@ -1512,6 +1715,6 @@ elif page == "Data Export":
 st.divider()
 
 st.caption(
-    "F1 RaceLab v3.0 · "
+    "F1 RaceLab v4.0 · "
     "Independent educational project · OpenF1"
 )

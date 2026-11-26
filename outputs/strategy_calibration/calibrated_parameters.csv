@@ -1,0 +1,4 @@
+Compound,Source,base_time,degradation,quadratic,max_age
+SOFT,Historical model,98.74059524355154,0.038851161216398304,0.0,26
+MEDIUM,Assumed fallback,98.76405704746222,0.05,0.0,40
+HARD,Historical model,98.5875188513729,0.05561454955749383,0.0,28

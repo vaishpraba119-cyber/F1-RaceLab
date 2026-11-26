@@ -17,46 +17,27 @@ def get_data(endpoint, params=None):
     if params is None:
         params = {}
 
-    for attempt in range(4):
-
+    last_error = None
+    for attempt in range(5):
         try:
-            response = requests.get(
-                f"{BASE_URL}/{endpoint}",
-                params=params,
-                timeout=60
-            )
-
-            # Handle API rate limits
-            if response.status_code == 429:
-                time.sleep(2 ** (attempt + 1))
-                continue
-
-            # Handle temporarily unavailable servers
-            if response.status_code >= 500:
-                time.sleep(2 ** (attempt + 1))
-                continue
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            time.sleep(0.5)
-
-            return pd.DataFrame(data)
-
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.ConnectionError
-        ):
-
-            if attempt == 3:
-                raise
-
-            time.sleep(2 ** (attempt + 1))
-
-    raise RuntimeError(
-        "OpenF1 API is temporarily unavailable."
-    )
+            response = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=60)
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = f"HTTP {response.status_code}"
+                try:
+                    delay = float(response.headers.get("Retry-After", 2 ** (attempt + 1)))
+                except ValueError:
+                    delay = 2 ** (attempt + 1)
+            else:
+                response.raise_for_status()
+                data = response.json()
+                time.sleep(0.5)
+                return pd.DataFrame(data)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_error = str(exc)
+            delay = 2 ** (attempt + 1)
+        if attempt < 4:
+            time.sleep(min(60, max(1, delay)))
+    raise RuntimeError(f"OpenF1 {endpoint} temporarily unavailable: {last_error}")
 
 
 # Generate available season options
@@ -82,7 +63,7 @@ def get_meetings(year):
 
     meetings["date_start"] = pd.to_datetime(
         meetings["date_start"],
-        utc=True
+        utc=True, format="ISO8601"
     )
 
     # Remove future events
@@ -109,12 +90,12 @@ def get_sessions(meeting_key):
 
     sessions["date_start"] = pd.to_datetime(
         sessions["date_start"],
-        utc=True
+        utc=True, format="ISO8601"
     )
 
     sessions["date_end"] = pd.to_datetime(
         sessions["date_end"],
-        utc=True
+        utc=True, format="ISO8601"
     )
 
     # Only include completed sessions
@@ -213,7 +194,7 @@ def get_lap_times(lap):
 
     start = pd.to_datetime(
         lap["date_start"],
-        utc=True
+        utc=True, format="ISO8601"
     )
 
     end = start + pd.to_timedelta(
@@ -250,7 +231,7 @@ def get_telemetry(
 
     telemetry["date"] = pd.to_datetime(
         telemetry["date"],
-        utc=True
+        utc=True, format="ISO8601"
     )
 
     telemetry = telemetry.sort_values("date")
@@ -317,7 +298,7 @@ def get_position(
 
     position["date"] = pd.to_datetime(
         position["date"],
-        utc=True
+        utc=True, format="ISO8601"
     )
 
     return position.sort_values(
